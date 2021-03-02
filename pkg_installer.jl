@@ -1,5 +1,44 @@
 using Pkg
 using Pkg.TOML
+Pkg.activate(@__DIR__)
+
+# ---------------------------------------------------------------------------------------------
+# Parsing ARGS
+
+try; @eval import ArgParse
+catch 
+    Pkg.add("ArgParse")
+    @eval import ArgParse
+end
+const AP = ArgParse
+
+argset = AP.ArgParseSettings()
+AP.@add_arg_table! argset begin
+    "--deep", "-d"
+        help = "define how many extra version of each pkg to install, " * 
+                "from newer to older."
+        arg_type = Int
+        default = 0
+    "--root", "-r"
+        help = "The root folder for searching projects."
+        arg_type = String
+        default = "."
+    "--dry-run"
+        help = "Run without consequences."
+        action = :store_true
+end
+
+if isinteractive()
+    # Dev values
+    deep = 0
+    dry_run = true
+    root = abspath(".")
+else
+    parsed_args = AP.parse_args(ARGS, argset)
+    deep = parsed_args["deep"]
+    dry_run = parsed_args["dry-run"]
+    root = abspath(parsed_args["root"])
+end
 
 ## ---------------------------------------------------------------------------------------------
 # Tools
@@ -12,17 +51,27 @@ function load_deps(proj_file)
     deps
 end
 
-function finddir(f::Function, root = pwd())
-    founds = []
-    for (root, dirs, files) in walkdir(root)
-        for dir in dirs
-            abspath = joinpath(root, dir)
-            f(abspath) && push!(founds, abspath)
+function find_projects(root = ".")
+    projs = String[]
+    c = 1
+    root = abspath(root)
+    for (dir, subdirs, _) in walkdir(root)
+        for subdir in subdirs, projname in Base.project_names
+            try
+                projfile = joinpath(dir, subdir, projname)
+                !isfile(projfile) && continue
+
+                # ignores
+                occursin("/.git/", projfile) && continue
+
+                push!(projs, projfile)
+                println(c, ": ", relpath(projfile, root))
+                c += 1
+            catch err; end
         end
     end
-    founds
+    projs
 end
-finddir(name::String, root = pwd()) = finddir((abspath) -> basename(abspath) == name, root)
 
 reg_dir() = joinpath(first(DEPOT_PATH),"registries")
 
@@ -49,50 +98,58 @@ function extract_uuid(regpath)
     return dat["uuid"]
 end
 
-## ---------------------------------------------------------------------------------------------
-# Install registers
-let
-    regs = ["https://github.com/josePereiro/CSC_Registry.jl"]
-    for url in regs
-        try
-            println("\n", "-" ^ 45)
-            @info("Adding registry", url)
-            Pkg.Registry.add(RegistrySpec(;url))
-        catch err
-            @warn("ERROR", url, err)
-        end
-    end
+function create_temp_proj(proj_dir)
+    temp_proj_dir = tempdir()
+    mkpath(temp_proj_dir)
+    cp(proj_dir, temp_proj_dir; force = true, follow_symlinks = true)
 end
 
 ## ---------------------------------------------------------------------------------------------
-pkgs_pool = Dict()
+# Looking for projects
+println("\n", "-" ^ 45)
+@info("Looking for projects", root)
+const projs = find_projects(root);
+
+## ---------------------------------------------------------------------------------------------
 # Install source projects
+const pkgs_pool = Dict()
 let
-    projs_dir = joinpath(@__DIR__, "Projects")
-    @assert isdir(projs_dir)
+    println("\n", "-" ^ 45)
+    @info("Installing source projects", root)
 
-    for proj_dir in readdir(projs_dir)
-        
-        abs_path = joinpath(projs_dir, proj_dir)
-        !isdir(abs_path) && continue
-
+    for proj_file in projs
         try
-            # Proj files
-            proj_file = joinpath(projs_dir, proj_dir, "Project.toml")
-            manf_file = joinpath(projs_dir, proj_dir, "Manifest.toml")
-            !isfile(proj_file) && (@warn("Not Project.toml found", proj_dir); continue)
-            
             # Install and update
             println("\n", "-" ^ 45)
-            @info("Project found", proj_dir)
-            Pkg.activate(proj_file)
-            isfile(manf_file) ? Pkg.instantiate() : Pkg.resolve()
-            Pkg.update()
-            Pkg.build()
+            proj_file = relpath(proj_file, root)
+            @info("Found on disk", proj_file)
+            proj_file = abspath(proj_file)
 
-            # Collect
+            # Collect devs
             pkgs = load_deps(proj_file)
             merge!(pkgs_pool, pkgs)
+
+            # Installing
+            if !dry_run 
+
+                # Temp env
+                proj_dir = create_temp_proj(dirname(proj_file))
+                try
+                    proj_file = joinpath(proj_dir, basename(proj_file))
+                    Pkg.activate(proj_file)
+
+                    for manf_name in Base.manifest_names
+                        manf_file = joinpath(proj_dir, manf_name)
+                        isfile(manf_file) && Pkg.instantiate()
+                    end
+                    Pkg.resolve()
+                    Pkg.update()
+                    Pkg.build()
+
+                finally
+                    rm(proj_dir; force = true, recursive = true)
+                end
+            end
 
         catch err
             @warn("ERROR", proj_file, err)
@@ -103,11 +160,13 @@ end
 ## ---------------------------------------------------------------------------------------------
 # Install version range
 let
-    VERS_PER_PKG = 50
-
+    pkgs_count = length(pkgs_pool)
+    println("\n", "-" ^ 45)
+    @info("Installing pkg versions", pkgs_count, deep)
+    
+    deep <= 0 && return
     for (uuidpkg, name) in pkgs_pool
         try
-
             versions = VersionNumber[]
             for path in findin_regs(name)
                 uuidfile = extract_uuid(path)
@@ -117,32 +176,33 @@ let
             sort!(unique!(versions), rev = true)
 
             println("\n" ^ 3, "-" ^ 45)
-            @info("Found", name, uuidpkg, length(versions))
+            @info("Found in register", name, uuidpkg, length(versions))
             
             # Installing version range
             c = 0
             for version in versions 
+
+                c >= deep && break
+                c += 1
+
                 println("\n", "-" ^ 45)
                 @info("Installing", name, uuidpkg, version)
                 
-                tempenv = tempdir()
-                mkpath(tempenv)
-                try
-                    Pkg.activate(tempenv)
-                    
-                    pkg = PackageSpec(name, Base.UUID(uuidpkg), version)
-                    Pkg.add(pkg)
-                    Pkg.build()
+                if !dry_run
+                    tempenv = tempdir()
+                    mkpath(tempenv)
+                    try
+                        Pkg.activate(tempenv)
+                        pkg = PackageSpec(name, Base.UUID(uuidpkg), version)
+                        Pkg.add(pkg)
+                        Pkg.build()
 
-                catch err
-                    @warn("ERROR", name, uuidpkg, version, err)
-                finally
-                    rm(tempenv; force = true, recursive = true)
+                    catch err
+                        @warn("ERROR", name, uuidpkg, version, err)
+                    finally
+                        rm(tempenv; force = true, recursive = true)
+                    end
                 end
-
-                c > VERS_PER_PKG && break
-                c += 1
-
             end
         catch err
             @warn("ERROR", name, uuidpkg, err)
