@@ -101,7 +101,14 @@ end
 function create_temp_proj(proj_dir)
     temp_proj_dir = tempdir()
     mkpath(temp_proj_dir)
-    cp(proj_dir, temp_proj_dir; force = true, follow_symlinks = true)
+    for file_names in [Base.project_names, Base.manifest_names]
+        for file_name in file_names
+            file = joinpath(file_name, proj_dir)
+            !isfile(file) && continue
+            cp(file, temp_proj_dir; force = true, follow_symlinks = true)
+        end
+    end
+    return temp_proj_dir
 end
 
 ## ---------------------------------------------------------------------------------------------
@@ -193,9 +200,9 @@ let
                     mkpath(tempenv)
                     try
                         Pkg.activate(tempenv)
-                        pkg = PackageSpec(name, Base.UUID(uuidpkg), version)
-                        Pkg.add(pkg)
-                        Pkg.build()
+                        # pkg = PackageSpec(name, Base.UUID(uuidpkg), version)
+                        # Pkg.add(pkg)
+                        # Pkg.build()
 
                     catch err
                         @warn("ERROR", name, uuidpkg, version, err)

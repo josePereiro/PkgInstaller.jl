@@ -1,12 +1,15 @@
 # PkgInstaller.jl
-And script that install julia packages from a set of `Project.toml` and/or `Manifest.toml`. It search projects from a given root folder
-and collect then. After that it will installs/activates/updates them.
+An script that install julia packages from a set of `Project.toml` and/or `Manifest.toml`. 
+It search projects from a given root folder
+and collect then (It will ignore .git folders). After that it will installs/activates/updatesbuild them. 
 Finally, it will install different versions of all explicit deps specified in all `Project.toml`s.
-All the work is done in temporal enviroments, so the script have no side effects.
+All the work is done in temporal enviroments, so the script have no effects on any enviroment.
+
+It is usefull when you a have not full time internet access and wants to make sure all (and more) is install and build.
 
 # Usage
 
-You must first add all required [Registries](https://julialang.github.io/Pkg.jl/v1.1/registries/#Adding-registries).
+You must first add all required [Registries](https://julialang.github.io/Pkg.jl/v1.1/registries/#Adding-registries-1).
 
 ```bash
 $ julia pkg_installer.jl --help
